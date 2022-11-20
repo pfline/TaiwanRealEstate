@@ -1,0 +1,557 @@
+---
+title: "Taiwan Real Estate"
+author: "Pierre FLINE"
+date: "15/02/2022"
+output: 
+  pdf_document: 
+    toc: yes
+    toc_depth: 2
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+library(knitr)
+
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+
+options(digits = 5)
+```
+
+```{r installation-load-packages-set-seed}
+if(!require(readxl)) install.packages("readxl", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart", repos = "http://cran.us.r-project.org")
+
+library(readxl)
+library(tidyverse)
+library(caret)
+library(rpart)
+
+tinytex::install_tinytex()
+
+set.seed(1)
+```
+
+# Introduction
+
+This report is produced as the final report to complete the *Data Science Professional Certificate*, an online program provided by [Harvard University](https://pll.harvard.edu/series/professional-certificate-data-science) through [edx](https://www.edx.org/) platform.  
+
+The assignment chosen is to create a model to predict the price of real estate properties in Taiwan with the best possible accuracy. The accuracy is here measured as the Residual Mean Squared Error (RMSE), which we can calculate this way:  
+
+$$
+RMSE = \sqrt{{\frac{1}{N}\sum_{}^{N}{(y - y')^2}}}
+$$
+where:  
+`y`: real price (outcome)  
+`y'`: predicted price (prediction)  
+N: number of prices (observations)  
+
+The original data set is provided by the [University of California (Irvine Campus)](https://uci.edu/).  
+
+# Data creation
+
+The original data set is downloaded from the website of the [University of California (Irvine Campus)](https://uci.edu/), on this webpage:   [https://archive.ics.uci.edu/ml/datasets/Real+estate+valuation+data+set#](https://archive.ics.uci.edu/ml/datasets/Real+estate+valuation+data+set#).  
+
+```{r load-data-set}
+url<-"https://archive.ics.uci.edu/ml/machine-learning-databases/00477/Real%20estate%20valuation%20data%20set.xlsx"
+path_tmp <- tempfile()
+download.file(url, 
+              destfile=path_tmp, method="curl")
+data <- read_excel(path_tmp)
+```
+
+# Data exploration/wrangling/visualisation
+
+There is no NA in the data set.
+```{r na-searth}
+sum(is.na(data))
+```
+
+Structure of the data set:  
+```{r structure}
+str(data)
+```
+
+We have 414 observations and 8 columns:  
+- the observation number (No)  
+- 6 predictors (X1, X2... X6)  
+- the outcome (Y)  
+
+We remove the column with the observation number (No) as it is not a useful information to predict the price.  
+We also change the columns names to be more succinct.  
+```{r data-wrangle}
+data<-select(data,-No)
+colnames(data)<-c("Transaction_date","Age","MRT","Stores","latitude","longitude","Price")
+```
+Here is a summary of the various variables:  
+```{r summary-variables}
+summary(data)
+```
+
+Here are the distributions of the variables (geographic coordinates excluded):  
+```{r variables-distributions, fig.height = 2}
+data %>% ggplot(aes(Transaction_date)) +
+  geom_histogram()
+data %>% ggplot(aes(Age)) +
+  geom_histogram()
+data %>% ggplot(aes(MRT)) +
+  geom_histogram()
+data %>% ggplot(aes(Stores)) +
+  geom_histogram()
+data %>% ggplot(aes(Price)) +
+  geom_histogram()
+```
+
+We notice that the transactions were made more or less at the same period of time (2012 and 2013). Apart from if there has been a real estate crisis at that period, we don't expect the prices to depend much on this parameter.  
+
+MRT and Price variables contain some isolated values (MRT>5000 and Price>90).  
+
+Let's look at the correlation coefficients of Price VS the other parameters (*Pearson* coefficient):  
+```{r correlations}
+cor(data,data$Price)
+```
+We see that the coefficient of Transaction_date is rather close to zero, which might confirm the fact that the transaction date does not have a strong influence on the price.    
+MRT, Stores, and the geographical coordinates have coefficients above 0.5 or below -0.5, they may be considered as more significant predictors than the others.  
+MRT has the coefficient closest to 1 or -1.  
+
+We plot the price VS the other variables (geographic coordinates excluded):  
+```{r price-plot-VS-other-variables}
+data %>%
+  gather(-c(Price,latitude, longitude), key="variables", value="values") %>%
+  ggplot(aes(x=values, y=Price))+
+  geom_point()+
+  facet_wrap(~variables, scales="free")
+```
+We mostly see a trend on Price VS MRT, which does not seem linear.
+
+We focus on the Price VS Stores relation by ploting the boxplots of Prices for each amount of Stores:  
+```{r boxplot-price-VS-stores}
+data %>%
+  ggplot(aes(y=Price, group=Stores))+
+  geom_boxplot()+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())+
+  labs(x="Stores")+
+  facet_grid(.~Stores)
+```
+When looking at the means, this could look like a linear model.  
+
+We plot the geographic repartition of the various variables:  
+```{r maps-price, fig.height = 2.5}
+data %>% ggplot(aes(longitude,latitude)) +
+  geom_point(aes(col=Price))+
+  scale_color_gradient(low="yellow",
+                        high="red",
+                      )+
+  theme_dark()
+```
+
+```{r maps-transaction_date, fig.height = 2.5}
+data %>% ggplot(aes(longitude,latitude)) +
+  geom_point(aes(col=Transaction_date))+
+  scale_color_gradient(low="yellow",
+                        high="red",
+                      )+
+  theme_dark()
+```
+
+```{r maps-age, fig.height = 2.5}
+data %>% ggplot(aes(longitude,latitude)) +
+  geom_point(aes(col=Age))+
+  scale_color_gradient(low="yellow",
+                       high="red",
+  )+
+  theme_dark()
+```
+
+```{r maps-MRT, fig.height = 2.5}
+data %>% ggplot(aes(longitude,latitude)) +
+  geom_point(aes(col=MRT))+
+  scale_color_gradient(low="yellow",
+                       high="red",
+  )+
+  theme_dark()
+```
+
+```{r maps-stores, fig.height = 2.5}
+data %>% ggplot(aes(longitude,latitude)) +
+  geom_point(aes(col=Stores))+
+  scale_color_gradient(low="yellow",
+                       high="red",
+  )+
+  theme_dark()
+```
+
+The strongest disparities with geographic gathering are on MRT and Stores variables. 
+# Data split
+
+We randomly split the data set into 2 sets:  
+- a **train_set** (80% of the observations): this is intended to train our algorithms  
+- a **test_set** (20% of the observations): this is intended to test our algorithms  
+
+This split choice is tricky as we need enough observations on the **train_set** in order to build a robust enough model, but we also need enough observations on the **test_set** to correctly assess the model. We choose to favor the **train_set** (i.e. the quality of our training) by allowing it more observations than the **test_set**, as the whole data set does not contain many observations (414).  
+
+The **train_set** and the **test_set** do not contain the observation numbers of the original data set (No).  
+```{r split-data}
+test_index <- createDataPartition(data$Price, times = 1, p = 0.2, list = FALSE)
+test_set <- data[test_index, ]
+train_set <- data[-test_index, ]
+```
+
+```{r RMSE-function}
+#We create a RMSE function to evaluate de Residual Mean Squared Error.
+RMSE<-function(true_ratings,predicted_ratings){
+  sqrt(mean((true_ratings-predicted_ratings)^2))
+}
+```
+
+# Methods/Analysis
+## Multivariate linear regression (lm)
+
+As we saw in the previous part:  
+- the variations of the Price VS the number of Stores could look like a linear model.  
+- the variations of the Price VS the other parameters (individually considered), did not seem to look like a linear model.  
+
+It still can be considered interesting to try a linear regression and see which result we get.  
+For this we use the lm() function.  
+
+We use the **train_set** to make a regression of Price VS all the other variables.  
+Then we make a prediction on the **test_set**.
+Here is the resulting RMSE:  
+```{r lm-all-data}
+lmfit<-lm(Price~.,train_set)
+lmprediction<-predict(lmfit,test_set)
+RMSElm<-RMSE(lmprediction,test_set$Price)
+Methodlm<-"Multivariate linear regression (lm)"
+Resultlm<-cbind(Methodlm,round(RMSElm,1))
+colnames(Resultlm)<-c("Method","RMSE")
+knitr::kable(Resultlm)
+```
+
+As we saw earlier, the transaction date did not seem to be very relevant (correlation coefficient closest to zero).  
+We make another linear regression, but without considering the transaction date this time.  
+Here is the resulting RMSE:  
+```{r lm-all-data-except-transaction_date}
+lmfit<-lm(Price~.-Transaction_date,train_set)
+lmprediction<-predict(lmfit,test_set)
+RMSElmwithoutdate<-RMSE(lmprediction,test_set$Price)
+Methodlmwithoutdate<-"Multivariate linear regression (lm) without transaction date"
+Resultlmwithoutdate<-cbind(Methodlmwithoutdate,round(RMSElmwithoutdate,1))
+colnames(Resultlmwithoutdate)<-c("Method","RMSE")
+knitr::kable(Resultlmwithoutdate)
+```
+
+We get a better result when not considering the transaction date.  
+
+## k-nearest neighbours (knn)
+
+The knn method seems appropriate to our assignment as one can easily imagine that properties in the same neighborhood and with the same characteristics are supposed to get the same value.  
+
+For this we train our data with the knn model from the caret package.  
+The tuning parameter is the number of neighbours (k) that we consider. To fix it, we train the algorithm with k from 2 to 50 and see the resulting RMSEs.  
+Here is the plot of the RMSE VS the number of neighbours (k):  
+```{r knn-training-plot}
+train_knn<-train(Price~.,method="knn",data=train_set,tuneGrid=data.frame(k=seq(2,50,1)))
+ggplot(train_knn,highlight=TRUE)
+```
+
+The best tune is the following k:  
+```{r knn-best-tune}
+train_knn$bestTune
+```
+And we reach the following RMSE on the **test_set**:  
+```{r knn-best_RMSE}
+knnprediction<-predict(train_knn,test_set)
+RMSEknn<-RMSE(knnprediction,test_set$Price)
+Methodknn<-"k-nearest neighbours (knn)"
+Resultknn<-cbind(Methodknn,round(RMSEknn,1))
+colnames(Resultknn)<-c("Method","RMSE")
+knitr::kable(Resultknn)
+```
+
+As in the linear regression model, we now try the knn model but without considering the transaction date.  
+Here is the plot of the RMSE VS the number of neighbours (k):  
+```{r knn-training-plot-without-date}
+train_knn<-train(Price~.-Transaction_date,method="knn",data=train_set,tuneGrid=data.frame(k=seq(2,50,1)))
+ggplot(train_knn,highlight=TRUE)
+```
+
+The best tune is the following k:  
+```{r knn-best-tune-without-date}
+train_knn$bestTune
+```
+And we reach the following RMSE on the **test_set**:  
+```{r knn-best_RMSE-without-date}
+knnprediction<-predict(train_knn,test_set)
+RMSEknnwithoutdate<-RMSE(knnprediction,test_set$Price)
+Methodknnwithoutdate<-"k-nearest neighbours (knn) without transaction date"
+Resultknnwithoutdate<-cbind(Methodknnwithoutdate,round(RMSEknnwithoutdate,1))
+colnames(Resultknnwithoutdate)<-c("Method","RMSE")
+knitr::kable(Resultknnwithoutdate)
+```
+
+We don't get a better result (at least no more than 0.1 better).  
+
+
+## Regression Trees
+
+As our outcome (Price) is continuous, we can make regressions with what we call *regression trees* with the rpart package.  
+
+Let's plot a tree with the default parameters:  
+```{r tree-default}
+train_rpart<-rpart(Price~.,data=train_set)
+plot(train_rpart, margin=0.1)
+text(train_rpart, cex=0.6)
+```
+This is interesting to see that the MRT predictor is the first one. Remember that among all the predictors, we previously observed that MRT had the *Pearson* coefficient closest to 1 or -1. This may confirm that this parameter has the strongest influence on the Price.  
+
+With the default parameters we get the following RMSE on the **test_set**:  
+```{r tree-default-RMSE}
+rpartprediction<-predict(train_rpart,test_set)
+RMSE(rpartprediction,test_set$Price)
+```
+
+To go further we can set 3 various parameters on the model, literally defined as follows in the rpart library:  
+- cp (complexity parameter): any split that does not decrease the overall lack of fit by a factor of cp is not attempted  
+- minsplit: the minimum number of observations that must exist in a node in order for a split to be attempted  
+- minbucket: the minimum number of observations in any terminal node  
+
+We compute regression trees for the following ranges combinations:  
+- cp: from 0 to 2 by 0.01  
+- minsplit: from 1 to 60 by 1  
+- minbucket: from 1 to 60 by 1  
+
+```{r regression-trees}
+cp<-seq(0,2,0.01)
+minsplit<-seq(1,60,1)
+minbucket<-seq(1,60,1)
+
+TuningMatrix<-matrix(nrow=length(cp)*length(minsplit)*length(minbucket),ncol=4)
+colnames(TuningMatrix)<-c("Minsplit","Minbucket","cp","RMSE")
+
+n<-0
+for(minsplitRange in 1:length(minsplit)){
+  for (minbucketRange in 1:length(minbucket)){
+    for (cpRange in 1:length(cp)){
+      n<-n+1
+      train_rpart<-rpart(Price~.,data=train_set,control=rpart.control(
+        minsplit=minsplit[minsplitRange],
+        minbucket=minbucket[minbucketRange],
+        cp=cp[cpRange]
+      ))
+      rpartprediction<-predict(train_rpart,test_set)
+      RMSE<-RMSE(rpartprediction,test_set$Price)
+      
+      TuningMatrix[n,1]<-minsplitRange
+      TuningMatrix[n,2]<-minbucketRange
+      TuningMatrix[n,3]<-cpRange
+      TuningMatrix[n,4]<-RMSE
+    }
+  }
+}
+
+TuningDataFrame<-as.data.frame(TuningMatrix)
+```
+
+The lowest RMSE on the **test_set** is obtained for the following parameters:
+```{r regression-trees-best}
+TuningDataFrame[which.min(TuningDataFrame$RMSE),]
+```
+
+Here is the lowest RMSE on the **test_set**:  
+```{r RMSE-regression-trees}
+RMSEtrees<-TuningDataFrame[which.min(TuningDataFrame$RMSE),]$RMSE
+Methodtrees<-"Regression Trees"
+Resulttrees<-cbind(Methodtrees,round(RMSEtrees,1))
+colnames(Resulttrees)<-c("Method","RMSE")
+knitr::kable(Resulttrees)
+```
+
+As in the linear regression model, we now try the *regression trees* model but without considering the transaction date.  
+
+```{r regression-trees-without-date}
+n<-0
+for(minsplitRange in 1:length(minsplit)){
+  for (minbucketRange in 1:length(minbucket)){
+    for (cpRange in 1:length(cp)){
+      n<-n+1
+      train_rpart<-rpart(Price~.-Transaction_date,data=train_set,control=rpart.control(
+        minsplit=minsplit[minsplitRange],
+        minbucket=minbucket[minbucketRange],
+        cp=cp[cpRange]
+      ))
+      rpartprediction<-predict(train_rpart,test_set)
+      RMSE<-RMSE(rpartprediction,test_set$Price)
+      
+      TuningMatrix[n,1]<-minsplitRange
+      TuningMatrix[n,2]<-minbucketRange
+      TuningMatrix[n,3]<-cpRange
+      TuningMatrix[n,4]<-RMSE
+    }
+  }
+}
+
+TuningDataFrame<-as.data.frame(TuningMatrix)
+```
+
+The lowest RMSE on the **test_set** is obtained for the following parameters:
+```{r regression-trees-best-without-date}
+TuningDataFrame[which.min(TuningDataFrame$RMSE),]
+```
+
+Here is the lowest RMSE on the **test_set**:  
+```{r RMSE-regression-trees-without-date}
+RMSEtreeswithoutdate<-TuningDataFrame[which.min(TuningDataFrame$RMSE),]$RMSE
+Methodtreeswithoutdate<-"Regression Trees without transaction date"
+Resulttreeswithoutdate<-cbind(Methodtreeswithoutdate,round(RMSEtreeswithoutdate,1))
+colnames(Resulttreeswithoutdate)<-c("Method","RMSE")
+knitr::kable(Resulttreeswithoutdate)
+```
+
+We get a much better result when not considering the transaction date.  
+
+Let's explore the plots of the RMSE on the **test_set** when not considering the transaction date and when:  
+- setting one parameter as the one resulting in the best RMSE  
+- changing the two other parameters  
+
+```{r setting-best-parameters}
+MinsplitMin<-TuningDataFrame[which.min(TuningDataFrame$RMSE),1]
+MinbucketMin<-TuningDataFrame[which.min(TuningDataFrame$RMSE),2]
+cpMin<-TuningDataFrame[which.min(TuningDataFrame$RMSE),3]
+```
+
+Plot for the best Minsplit:  
+```{r plot-best-minsplit, fig.height = 2.5}
+TuningDataFrame %>%
+  filter(Minsplit==MinsplitMin) %>%
+  ggplot(aes(x=Minbucket,y=cp, z=RMSE,fill=RMSE))+
+  geom_tile()+
+  scale_fill_gradient(low = "red", high = "yellow")
+```
+
+Plot for the best Minbucket:  
+```{r plot-best-minbucket, fig.height = 2.5}
+TuningDataFrame %>%
+  filter(Minbucket==MinbucketMin) %>%
+  ggplot(aes(x=Minsplit,y=cp, z=RMSE,fill=RMSE))+
+  geom_tile()+
+  scale_fill_gradient(low = "red", high = "yellow")
+```
+
+Plot for the best cp:  
+```{r plot-best-cp, fig.height = 2.5}
+TuningDataFrame %>%
+  filter(cp==cpMin) %>%
+  ggplot(aes(x=Minsplit,y=Minbucket, z=RMSE,fill=RMSE))+
+  geom_tile()+
+  scale_fill_gradient(low = "red", high = "yellow")
+```
+
+When looking at the three previous plots, we observe that cp seems to have the strongest influence on the RMSE.  
+
+
+## Random Forest
+
+The idea of the random forest technique is to randomly generate predictions using regression trees and to average these predictions. This is supposed to get a better stability in the results.  
+
+We train our data with the Rborist model from the caret package.  
+The advantage of this model compared to the rf one is that we can set as tuning parameter the minimum node size (*minNode*).  
+We evaluate the RMSE with *minNode* from 1 to 300 by 1 (this is very large and it does not seem useful to try higher values as our **train_set** only has 329 observations).  
+
+```{r rf-training}
+minnode<-seq(1,300,1)
+RMSE_rborist<-sapply(minnode,function(minnode){
+  train_rborist<-train(Price~.,
+                  method="Rborist",
+                  data=train_set,
+                  .minNode=minnode)
+  rboristprediction<-predict(train_rborist,test_set)
+  RMSE(rboristprediction,test_set$Price)
+})
+```
+
+Here is the best RMSE on the **test_set** :  
+```{r RMSE-rf}
+RMSErf<-min(RMSE_rborist)
+Methodrf<-"Random Forest (Rborist)"
+Resultrf<-cbind(Methodrf,round(RMSErf,1))
+colnames(Resultrf)<-c("Method","RMSE")
+knitr::kable(Resultrf)
+```
+which is obtained for the following *minNode* value:  
+```{r rborist-minnode-lowest-RMSE}
+minnode[which.min(RMSE_rborist)]
+```
+
+As in the linear regression model, we now try the Rborist model but without considering the transaction date.  
+```{r rf-training-without-date}
+minnode<-seq(1,300,1)
+RMSE_rborist<-sapply(minnode,function(minnode){
+  train_rborist<-train(Price~.-Transaction_date,
+                  method="Rborist",
+                  data=train_set,
+                  .minNode=minnode)
+  rboristprediction<-predict(train_rborist,test_set)
+  RMSE(rboristprediction,test_set$Price)
+})
+```
+
+Here is the best RMSE on the **test_set**:  
+```{r RMSE-rf-without-date}
+RMSErfwithoutdate<-min(RMSE_rborist)
+Methodrfwithoutdate<-"Random Forest (Rborist) without transaction date"
+Resultrfwithoutdate<-cbind(Methodrfwithoutdate,round(RMSErfwithoutdate,1))
+colnames(Resultrfwithoutdate)<-c("Method","RMSE")
+knitr::kable(Resultrfwithoutdate)
+```
+which is obtained for the following *minNode* value:  
+```{r rborist-minnode-lowest-RMSE-without-date}
+minnode[which.min(RMSE_rborist)]
+```
+
+We get a better result when not considering the transaction date.  
+
+Here is a plot of RMSE on the **test_set** regarding the *minNode* values when not considering the transaction date:  
+```{r RMSE-VS-minnode}
+qplot(minnode,RMSE_rborist)
+```
+We should note that the dispersion seems important but all the results stay in a reasonable range (RMSE stays more or less between 6.2 and 6.4).  
+
+# Results
+
+Here is a summary of the models we used and the resulting RMSE on the **test_set**:  
+
+```{r results}
+Methods<-c(Methodlm,Methodlmwithoutdate,Methodknn,Methodknnwithoutdate,Methodtrees,Methodtreeswithoutdate,Methodrf,Methodrfwithoutdate)
+RMSES<-c(RMSElm,RMSElmwithoutdate,RMSEknn,RMSEknnwithoutdate,RMSEtrees,RMSEtreeswithoutdate,RMSErf,RMSErfwithoutdate)
+Results<-cbind(Methods,round(RMSES,1))
+colnames(Results)<-c("Method","RMSE on the test_set")
+knitr::kable(Results)
+```
+
+- Each time we do not consider the transaction date, we get a roughly equal (knn) or better (all but knn) result. This is an important insight as one may naturally think that considering more predictors would have led to a more accurate model, but this is not the case here  
+
+- The knn method does not lead to a better result than the lm one, we interpret it in the fact that lm considers all the observations whereas knn only considers the k nearest observations. The nearest can be in reality far away. If we had much more observations, with a smooth repartition, we might expect a better result with the knn method than with the lm one  
+- The Rborist method leads to a better result than the Regression Trees, which seems logical as it has the same principle but is more advanced  
+
+- The Rborist method without considering transaction date leads to the best result, we interpret it in the fact that it is the only method that we used that:  
+  * is not linear  
+  * considers all the observations for each prediction   
+  * smooths random variability  
+  * does not consider the variable "transaction date" which did not seem to have a strong influence on the Price (*Pearson* coefficient close to zero)
+
+
+# Conclusion
+
+The Rborist random forest model without considering the transaction date reached the best RMSE on the **test_set**.  
+
+To go further we could:  
+- compute Monte Carlo simulations on these models to get more stable results  
+- remove a given quantile from the original data set (e.g. the observations with MRT>5000, Price>90, or the 10% geographically furthest from the rest...). This might lead to a lower accuracy when predicting in the area of the removed observations, but to a better accuracy on the area of most of the observations  
+- explore other random forest algorithms with different tuning parameters, such as *ranger*, *extraTrees*, or *rfRules*  
+- map the properties on a satellite-view map, as a human eye can understand things differently when looked on a map  
+
+# Citations (original data provider)
+
+Yeh, I. C., & Hsu, T. K. (2018). Building real estate valuation models with comparative approach through case-based reasoning. Applied Soft Computing, 65, 260-271.
